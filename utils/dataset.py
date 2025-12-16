@@ -102,7 +102,10 @@ def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerp
     assert cache_size <= dataset_size
     if cache_size == dataset_size:
         return cache
-    dataset = dataset.select(range(cache_size, dataset_size), keep_in_memory=True)
+    # Avoid holding the entire subset in memory while caching. For large datasets this
+    # causes worker RAM usage to gradually grow as processed examples accumulate. Let
+    # HF Datasets stream from disk instead.
+    dataset = dataset.select(range(cache_size, dataset_size), keep_in_memory=False)
 
     # Let each worker process know its rank
     manager = mp.Manager()
@@ -183,7 +186,14 @@ def _cache_text_embeddings(metadata_dataset, map_fn, i, cache_dir, regenerate_ca
                     result[key].append(value[i])
         return result
 
-    flattened_captions = metadata_dataset.map(flatten_captions, batched=True, keep_in_memory=True, remove_columns=metadata_dataset.column_names)
+    # Do not keep flattened captions in memory when the caption list is very large.
+    # Keeping the map output resident leads to rising RAM during cache generation.
+    flattened_captions = metadata_dataset.map(
+        flatten_captions,
+        batched=True,
+        keep_in_memory=False,
+        remove_columns=metadata_dataset.column_names,
+    )
     te_dataset = _map_and_cache(
         flattened_captions,
         map_fn,
