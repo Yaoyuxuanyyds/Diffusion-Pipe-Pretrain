@@ -831,7 +831,15 @@ if __name__ == '__main__':
     communication_data_type = config['lora']['dtype'] if 'lora' in config else config['model']['dtype']
     model_engine.communication_data_type = communication_data_type
 
-    train_dataloader = dataset_util.PipelineDataLoader(train_data, model_engine, model_engine.gradient_accumulation_steps(), model)
+    prefetch_batches_per_worker = config.get('dataloader_prefetch_per_worker', 1)
+    train_dataloader = dataset_util.PipelineDataLoader(
+        train_data,
+        model_engine,
+        model_engine.gradient_accumulation_steps(),
+        model,
+        num_dataloader_workers=config.get('num_dataloader_workers', 1),
+        prefetch_batches_per_worker=prefetch_batches_per_worker,
+    )
     steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
 
     scheduler_type = config.get('lr_scheduler', 'constant')
@@ -882,7 +890,14 @@ if __name__ == '__main__':
             pg['lr'] = config['force_constant_lr']
 
     eval_dataloaders = {
-        name: dataset_util.PipelineDataLoader(eval_data, model_engine, config['eval_gradient_accumulation_steps'], model)
+        name: dataset_util.PipelineDataLoader(
+            eval_data,
+            model_engine,
+            config['eval_gradient_accumulation_steps'],
+            model,
+            num_dataloader_workers=config.get('num_dataloader_workers', 1),
+            prefetch_batches_per_worker=prefetch_batches_per_worker,
+        )
         for name, eval_data in eval_data_map.items()
     }
 
@@ -972,6 +987,7 @@ if __name__ == '__main__':
         model_engine.reset_activation_shape()
         iterator = get_data_iterator_for_step(train_dataloader, model_engine)
         loss = model_engine.train_batch(iterator).item()
+        loss_breakdown = model.get_loss_breakdown() if hasattr(model, "get_loss_breakdown") else None
         epoch_loss += loss
         num_steps += 1
         train_dataloader.sync_epoch()
@@ -993,8 +1009,27 @@ if __name__ == '__main__':
 
         if is_main_process() and step % config['logging_steps'] == 0:
             tb_writer.add_scalar(f'train/loss', loss, x_axis)
+            if loss_breakdown:
+                denoise_loss = loss_breakdown.get('denoise_loss')
+                text_recon_loss = loss_breakdown.get('text_recon_loss')
+                if denoise_loss is not None:
+                    tb_writer.add_scalar('train/denoise_loss', denoise_loss, x_axis)
+                if text_recon_loss is not None:
+                    tb_writer.add_scalar('train/text_recon_loss', text_recon_loss, x_axis)
+                print(
+                    f"[train] step={step} loss={loss:.6f} "
+                    f"denoise_loss={denoise_loss if denoise_loss is not None else 'n/a'} "
+                    f"text_recon_loss={text_recon_loss if text_recon_loss is not None else 'n/a'}",
+                    flush=True,
+                )
             if wandb_enable:
-                wandb.log({'train/loss': loss, 'step': x_axis})
+                log_payload = {'train/loss': loss, 'step': x_axis}
+                if loss_breakdown:
+                    if denoise_loss is not None:
+                        log_payload['train/denoise_loss'] = denoise_loss
+                    if text_recon_loss is not None:
+                        log_payload['train/text_recon_loss'] = text_recon_loss
+                wandb.log(log_payload)
             if optimizer.__class__.__name__ == 'Prodigy':
                 prodigy_d = get_prodigy_d(optimizer)
                 tb_writer.add_scalar(f'train/prodigy_d', prodigy_d, x_axis)

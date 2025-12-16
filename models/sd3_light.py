@@ -102,6 +102,7 @@ class LightSD3Pipeline(BasePipeline):
         """
         self.config = config
         self.model_config = config["model"]
+        self._latest_loss_breakdown = None
 
         dtype = self.model_config["dtype"]
         diffusers_path = self.model_config.get("diffusers_path", None)
@@ -293,6 +294,7 @@ class LightSD3Pipeline(BasePipeline):
         self.diffusers_pipeline = pipe
         self.config = dummy_config
         self.model_config = dummy_config["model"]
+        self._latest_loss_breakdown = None
 
         # 3. 🔥 裁剪 transformer（SD3-Light-15 的关键）
         num_layers = self.model_config.get("num_layers", None)
@@ -531,20 +533,84 @@ class LightSD3Pipeline(BasePipeline):
     # -------------------------
     def to_layers(self):
         transformer = self.transformer
-        layers = [InitialLayer(transformer)]
-        for block in transformer.transformer_blocks:
-            layers.append(TransformerLayer(block))
-        layers.append(FinalLayer(transformer))
+        text_recon_config = self._text_recon_config()
+        layers = [InitialLayer(transformer, text_recon_config)]
+        for idx, block in enumerate(transformer.transformer_blocks, start=1):
+            layers.append(TransformerLayer(block, idx, text_recon_config))
+        layers.append(FinalLayer(transformer, text_recon_config))
         return layers
+
+    def _text_recon_config(self):
+        gamma = float(self.model_config.get("text_recon_gamma", 0.0))
+        target_layer = int(self.model_config.get("text_recon_target_layer", 0))
+        return {
+            "enabled": gamma > 0,
+            "gamma": gamma,
+            "target_layer": target_layer,
+        }
+
+    def _update_loss_breakdown(self, denoise_loss, text_loss, gamma: float):
+        with torch.no_grad():
+            total_loss = denoise_loss
+            text_val = None
+            if text_loss is not None:
+                total_loss = total_loss + gamma * text_loss
+                text_val = float(text_loss.detach())
+
+            self._latest_loss_breakdown = {
+                "denoise_loss": float(denoise_loss.detach()),
+                "text_recon_loss": text_val,
+                "total_loss": float(total_loss.detach()),
+            }
+
+    def get_loss_breakdown(self):
+        return getattr(self, "_latest_loss_breakdown", None)
+
+    def get_loss_fn(self):
+        base_loss_fn = super().get_loss_fn()
+        text_recon_config = self._text_recon_config()
+        text_recon_enabled = text_recon_config["enabled"]
+        gamma = text_recon_config["gamma"]
+
+        def loss_fn(output, label):
+            target, mask = label
+            final_tokens = None
+            target_tokens = None
+
+            if text_recon_enabled and isinstance(output, tuple) and len(output) == 3:
+                output, final_tokens, target_tokens = output
+
+            denoise_loss = base_loss_fn(output, (target, mask))
+            text_loss = None
+
+            if (
+                text_recon_enabled
+                and final_tokens is not None
+                and target_tokens is not None
+                and target_tokens.numel() > 0
+            ):
+                with torch.autocast("cuda", enabled=False):
+                    final_tokens = final_tokens.to(torch.float32)
+                    target_tokens = target_tokens.to(final_tokens.device, torch.float32)
+                    text_loss = F.mse_loss(final_tokens, target_tokens, reduction="mean")
+
+            total_loss = denoise_loss if text_loss is None else denoise_loss + gamma * text_loss
+            self._update_loss_breakdown(denoise_loss, text_loss, gamma)
+
+            return total_loss
+
+        return loss_fn
 
 
 class InitialLayer(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, text_recon_config):
         super().__init__()
         self.pos_embed = model.pos_embed
         self.time_text_embed = model.time_text_embed
         self.context_embedder = model.context_embedder
         self.model = [model]
+        self.text_recon_enabled = text_recon_config["enabled"]
+        self.text_recon_target_layer = text_recon_config["target_layer"]
 
     def __getattr__(self, name):
         return getattr(self.model[0], name)
@@ -563,19 +629,35 @@ class InitialLayer(nn.Module):
         hidden_states = self.pos_embed(hidden_states)  # adds positional embeddings
         temb = self.time_text_embed(timestep, pooled_projections)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
+        result = make_contiguous(hidden_states, temb, latent_size, encoder_hidden_states)
 
-        return make_contiguous(hidden_states, temb, latent_size, encoder_hidden_states)
+        if self.text_recon_enabled:
+            target_tokens = (
+                encoder_hidden_states.detach()
+                if self.text_recon_target_layer == 0
+                else torch.empty(0, device=encoder_hidden_states.device, dtype=encoder_hidden_states.dtype)
+            )
+            result += (target_tokens,)
+
+        return result
 
 
 class TransformerLayer(nn.Module):
-    def __init__(self, block):
+    def __init__(self, block, layer_idx, text_recon_config):
         super().__init__()
         self.block = block
+        self.layer_idx = layer_idx
+        self.text_recon_enabled = text_recon_config["enabled"]
+        self.text_recon_target_layer = text_recon_config["target_layer"]
 
     @torch.autocast("cuda", dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         hidden_states, temb, latent_size, *extra = inputs
         encoder_hidden_states = extra[0] if len(extra) > 0 else None
+        target_tokens = None
+
+        if self.text_recon_enabled:
+            target_tokens = extra[1] if len(extra) > 1 else None
 
         encoder_hidden_states, hidden_states = self.block(
             hidden_states=hidden_states,
@@ -586,24 +668,35 @@ class TransformerLayer(nn.Module):
         result = make_contiguous(hidden_states, temb, latent_size)
         if encoder_hidden_states is not None:
             result += (encoder_hidden_states,)
+
+        if self.text_recon_enabled:
+            if target_tokens is None:
+                target_tokens = torch.empty(0, device=hidden_states.device, dtype=hidden_states.dtype)
+            if self.layer_idx == self.text_recon_target_layer:
+                target_tokens = encoder_hidden_states.detach()
+            result += (target_tokens,)
         return result
 
 
 class FinalLayer(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, text_recon_config):
         super().__init__()
         self.norm_out = model.norm_out
         self.proj_out = model.proj_out
         self.model = [model]
+        self.text_recon_enabled = text_recon_config["enabled"]
 
     def __getattr__(self, name):
         return getattr(self.model[0], name)
 
     @torch.autocast("cuda", dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        hidden_states, temb, latent_size, *_ = inputs
+        hidden_states, temb, latent_size, *extra = inputs
         height = int(latent_size[0].item())
         width = int(latent_size[1].item())
+
+        encoder_hidden_states = extra[0] if len(extra) > 0 else None
+        target_tokens = extra[1] if len(extra) > 1 else None
 
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
@@ -622,4 +715,10 @@ class FinalLayer(nn.Module):
         output = hidden_states.reshape(
             shape=(hidden_states.shape[0], self.out_channels, height * patch_size, width * patch_size)
         )
+
+        if self.text_recon_enabled and encoder_hidden_states is not None:
+            if target_tokens is None:
+                target_tokens = torch.empty(0, device=encoder_hidden_states.device, dtype=encoder_hidden_states.dtype)
+            return output, encoder_hidden_states, target_tokens
+
         return output
