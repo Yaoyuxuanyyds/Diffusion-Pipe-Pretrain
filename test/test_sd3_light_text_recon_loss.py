@@ -31,6 +31,11 @@ def test_text_recon_loss_combines_with_denoise_loss():
 
     assert torch.allclose(loss, base + 0.5 * text)
 
+    breakdown = pipe.get_loss_breakdown()
+    assert breakdown["denoise_loss"] == pytest.approx(base.item())
+    assert breakdown["text_recon_loss"] == pytest.approx(text.item())
+    assert breakdown["total_loss"] == pytest.approx(loss.item())
+
 
 def test_no_text_tokens_falls_back_to_base_loss():
     pipe = _build_pipe(gamma=0.75, target_layer=1)
@@ -43,3 +48,8 @@ def test_no_text_tokens_falls_back_to_base_loss():
     loss = loss_fn(pred, (target, mask))
 
     assert torch.allclose(loss, torch.mean((pred - target) ** 2))
+
+    breakdown = pipe.get_loss_breakdown()
+    assert breakdown["denoise_loss"] == pytest.approx(loss.item())
+    assert breakdown["text_recon_loss"] is None
+    assert breakdown["total_loss"] == pytest.approx(loss.item())

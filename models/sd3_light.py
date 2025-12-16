@@ -102,6 +102,7 @@ class LightSD3Pipeline(BasePipeline):
         """
         self.config = config
         self.model_config = config["model"]
+        self._latest_loss_breakdown = None
 
         dtype = self.model_config["dtype"]
         diffusers_path = self.model_config.get("diffusers_path", None)
@@ -293,6 +294,7 @@ class LightSD3Pipeline(BasePipeline):
         self.diffusers_pipeline = pipe
         self.config = dummy_config
         self.model_config = dummy_config["model"]
+        self._latest_loss_breakdown = None
 
         # 3. 🔥 裁剪 transformer（SD3-Light-15 的关键）
         num_layers = self.model_config.get("num_layers", None)
@@ -547,13 +549,27 @@ class LightSD3Pipeline(BasePipeline):
             "target_layer": target_layer,
         }
 
+    def _update_loss_breakdown(self, denoise_loss, text_loss, gamma: float):
+        with torch.no_grad():
+            total_loss = denoise_loss
+            text_val = None
+            if text_loss is not None:
+                total_loss = total_loss + gamma * text_loss
+                text_val = float(text_loss.detach())
+
+            self._latest_loss_breakdown = {
+                "denoise_loss": float(denoise_loss.detach()),
+                "text_recon_loss": text_val,
+                "total_loss": float(total_loss.detach()),
+            }
+
+    def get_loss_breakdown(self):
+        return getattr(self, "_latest_loss_breakdown", None)
+
     def get_loss_fn(self):
         base_loss_fn = super().get_loss_fn()
         text_recon_config = self._text_recon_config()
-
-        if not text_recon_config["enabled"]:
-            return base_loss_fn
-
+        text_recon_enabled = text_recon_config["enabled"]
         gamma = text_recon_config["gamma"]
 
         def loss_fn(output, label):
@@ -561,20 +577,27 @@ class LightSD3Pipeline(BasePipeline):
             final_tokens = None
             target_tokens = None
 
-            if isinstance(output, tuple) and len(output) == 3:
+            if text_recon_enabled and isinstance(output, tuple) and len(output) == 3:
                 output, final_tokens, target_tokens = output
 
             denoise_loss = base_loss_fn(output, (target, mask))
+            text_loss = None
 
-            if final_tokens is None or target_tokens is None or target_tokens.numel() == 0:
-                return denoise_loss
+            if (
+                text_recon_enabled
+                and final_tokens is not None
+                and target_tokens is not None
+                and target_tokens.numel() > 0
+            ):
+                with torch.autocast("cuda", enabled=False):
+                    final_tokens = final_tokens.to(torch.float32)
+                    target_tokens = target_tokens.to(final_tokens.device, torch.float32)
+                    text_loss = F.mse_loss(final_tokens, target_tokens, reduction="mean")
 
-            with torch.autocast("cuda", enabled=False):
-                final_tokens = final_tokens.to(torch.float32)
-                target_tokens = target_tokens.to(final_tokens.device, torch.float32)
-                text_loss = F.mse_loss(final_tokens, target_tokens, reduction="mean")
+            total_loss = denoise_loss if text_loss is None else denoise_loss + gamma * text_loss
+            self._update_loss_breakdown(denoise_loss, text_loss, gamma)
 
-            return denoise_loss + gamma * text_loss
+            return total_loss
 
         return loss_fn
 

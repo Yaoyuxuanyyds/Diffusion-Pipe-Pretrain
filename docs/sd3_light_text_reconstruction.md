@@ -38,6 +38,10 @@ text_recon_target_layer = 0
      - 文本 tokens 间的逐 token MSE（若存在有效目标 tokens）。
    - 最终损失：`loss = denoise_loss + gamma * text_recon_loss`。
 
+3. **训练日志输出**
+   - 每个 `logging_steps` 间隔内，TensorBoard/W&B 额外记录 `train/denoise_loss` 与 `train/text_recon_loss`（若启用）。
+   - 同步在标准输出打印三者，以便快速对比总损失与各分量。
+
 ## 兼容性与性能
 
 - 当 `text_recon_gamma = 0` 时，前向输出与损失逻辑与旧版完全一致，不额外开销。
