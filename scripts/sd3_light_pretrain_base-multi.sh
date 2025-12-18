@@ -1,23 +1,31 @@
 set -euo pipefail
 
-
-# =============== 阶段 0：环境 ===============
 source /inspire/hdd/project/chineseculture/public/yuxuan/miniconda3/etc/profile.d/conda.sh
 conda activate diffusion-pipe
 
-# 进入项目目录
 cd /inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe
+
+
+unset RANK || true
+unset WORLD_SIZE || true
+unset LOCAL_RANK || true
 
 export NCCL_P2P_DISABLE=0
 export NCCL_IB_DISABLE=0
-# export NCCL_SOCKET_IFNAME=eth0   # 按实际网卡修改
+# export NCCL_SOCKET_IFNAME=eth0   # 如有多网卡建议打开
 
-export WORLD_SIZE=$((PET_NNODES * 8))
-export RANK=$((PET_NODE_RANK * 8))
+# ===== rendezvous 关键 =====
+if [ "${PET_NODE_RANK}" -eq 0 ]; then
+  export MASTER_ADDR=$(hostname -I | awk '{print $1}')
+fi
+export MASTER_PORT=29500
 
-deepspeed \
-  --num_nodes ${PET_NNODES} \
-  --num_gpus 8 \
+torchrun \
+  --nnodes ${PET_NNODES} \
+  --node_rank ${PET_NODE_RANK} \
+  --nproc_per_node 8 \
+  --master_addr ${MASTER_ADDR} \
+  --master_port ${MASTER_PORT} \
   train.py \
   --deepspeed \
   --config /inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/settings/train/pretrain_sd3_light_base-multi.toml \

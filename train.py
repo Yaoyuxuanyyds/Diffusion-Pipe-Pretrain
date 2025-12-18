@@ -408,11 +408,12 @@ if __name__ == '__main__':
         dataset_util.NUM_PROC = map_num_proc
 
     # Initialize distributed environment before deepspeed
-    world_size, rank, local_rank = distributed_init(args)
+    # world_size, rank, local_rank = distributed_init(args)
 
     # Now initialize deepspeed
     deepspeed.init_distributed()
-
+    
+    local_rank = args.local_rank
     # needed for broadcasting Queue in dataset.py
     # torch.cuda.set_device(dist.get_rank())
     torch.cuda.set_device(local_rank)

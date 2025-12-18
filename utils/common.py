@@ -26,7 +26,10 @@ AUTOCAST_DTYPE = None
 
 
 def get_rank():
-    return dist.get_rank()
+    # return dist.get_rank()
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return 0
 
 
 def is_main_process():

@@ -1,52 +1,3 @@
-# import math
-# import os
-
-# # -----------------------
-# # 参数
-# # -----------------------
-# N = 2174  # 总子目录数
-# K = 1    # 生成 32 个 toml
-# OUTPUT_DIR = "/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/settings/cache/dataset"
-# BASE_PATH = "/inspire/hdd/project/chineseculture/public/yuxuan/datasets/cc12m-unpacked"
-# PREFIX = "cc12m-train-"
-
-# # -----------------------
-# # 创建输出目录
-# # -----------------------
-# os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# # -----------------------
-# # 计算每个 shard 的大小
-# # -----------------------
-# chunk_size = math.ceil(N / K)
-
-# print(f"Total dirs: {N}, Shards: {K}, Chunk size: {chunk_size}")
-
-# # -----------------------
-# # 生成 32 个 toml 文件
-# # -----------------------
-# for shard_id in range(K):
-#     start = shard_id * chunk_size
-#     end = min(N, (shard_id + 1) * chunk_size)
-
-#     toml_path = os.path.join(OUTPUT_DIR, f"cc12m_dataset_{shard_id:04d}.toml")
-
-#     with open(toml_path, "w") as f:
-#         # 写 resolutions
-#         f.write("resolutions = [256]\n\n")
-        
-#         # 写每个 directory 块
-#         for i in range(start, end):
-#             dirname = f"{PREFIX}{i:04d}"
-#             full_path = os.path.join(BASE_PATH, dirname)
-
-#             f.write(f"[[directory]]\n")
-#             f.write(f"path = '{full_path}'\n")
-#             f.write("num_repeats = 1\n\n")
-
-#     print(f"Generated: {toml_path} ({start} - {end - 1})")
-
-# print("DONE.")
 
 
 
@@ -56,11 +7,11 @@ import os
 # -----------------------
 # 参数（可调）
 # -----------------------
-START_IDX = 1700        # cc12m-train-0001
-END_IDX = 1767       # cc12m-train-2174（包含）
-K = 8                # 生成多少个 toml
+START_IDX = 0        # cc12m-train-0001
+END_IDX = 650       # cc12m-train-2174（包含）
+K = 30               # 生成多少个 toml
 
-OUTPUT_DIR = "/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/settings/cache/dataset/extra"
+OUTPUT_DIR = "/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/settings/cache/dataset"
 BASE_PATH = "/inspire/hdd/project/chineseculture/public/yuxuan/datasets/cc12m-unpacked"
 PREFIX = "cc12m-train-"
 
@@ -93,7 +44,7 @@ for shard_id in range(K):
 
     toml_path = os.path.join(
         OUTPUT_DIR,
-        f"cc12m_dataset_25-{shard_id:02d}.toml"
+        f"sd3_cache_dataset_{shard_id:04d}.toml"
     )
 
     with open(toml_path, "w") as f:
