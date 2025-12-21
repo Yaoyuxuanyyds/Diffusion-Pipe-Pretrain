@@ -542,7 +542,7 @@ if __name__ == '__main__':
         'gradient_clipping': 0. if gradient_release else config.get('gradient_clipping', 1.0),
         'steps_per_print': config.get('steps_per_print', 1),
     }
-    sd3_streaming = training_type == "sd3_light_pretrain" and config.get("sd3_streaming_dataset", True)
+    sd3_streaming = config.get("sd3_streaming_dataset", False)
     caching_batch_size = config.get('caching_batch_size', 1)
     eval_data_map = {}
 
