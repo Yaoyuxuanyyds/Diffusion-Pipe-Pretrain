@@ -72,6 +72,11 @@ class SD3LightManifestBuilder:
         self.vae_fn = self.model.get_call_vae_fn(self.model.get_vae())
         self.text_encoders = self.model.get_text_encoders()
         self.text_fns = [self.model.get_call_text_encoder_fn(te) for te in self.text_encoders]
+        # ensure inference mode
+        self.model.get_vae().eval()
+        for te in self.text_encoders:
+            if hasattr(te, "eval"):
+                te.eval()
 
     def _fingerprint(self):
         content = json.dumps(self.dataset_config, sort_keys=True)
@@ -118,24 +123,25 @@ class SD3LightManifestBuilder:
                     return
                 device = self.model.get_vae().device
                 dtype = self.model.get_vae().dtype
-                pixel_batch = torch.stack([item['pixel_values'] for item in batch_items]).to(device, dtype=dtype)
-                masks = [item['mask'] for item in batch_items]
-                latents = self.vae_fn(pixel_batch)['latents'].cpu()
-                captions_batch = [item['caption'] for item in batch_items]
-                is_video = [False] * len(batch_items)
+                with torch.inference_mode():
+                    pixel_batch = torch.stack([item['pixel_values'] for item in batch_items]).to(device, dtype=dtype, non_blocking=True)
+                    masks = [item['mask'] for item in batch_items]
+                    latents = self.vae_fn(pixel_batch)['latents'].detach().cpu()
+                    captions_batch = [item['caption'] for item in batch_items]
+                    is_video = [False] * len(batch_items)
 
-                text_dict = {}
-                for fn in self.text_fns:
-                    td = fn(captions_batch, is_video)
-                    for k, v in td.items():
-                        text_dict[k] = v.cpu()
+                    text_dict = {}
+                    for fn in self.text_fns:
+                        td = fn(captions_batch, is_video)
+                        for k, v in td.items():
+                            text_dict[k] = v.detach().cpu()
 
                 for idx, item in enumerate(batch_items):
                     mask_tensor = masks[idx]
                     if mask_tensor is None:
                         mask_tensor = torch.tensor([])
                     sample = {
-                        'latents': latents[idx].cpu(),
+                        'latents': latents[idx],
                         'mask': mask_tensor.cpu(),
                         'caption': item['caption'],
                         'prompt_embed': text_dict.get('prompt_embed', torch.tensor([]))[idx] if text_dict.get('prompt_embed', None) is not None and text_dict.get('prompt_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
