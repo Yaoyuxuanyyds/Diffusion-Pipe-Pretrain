@@ -61,11 +61,12 @@ class SD3LightManifestBuilder:
     the minimal metadata required to stream data efficiently at train time.
     """
 
-    def __init__(self, dataset_config, model, model_name: str, cache_root: Path, shard_size: int = 512):
+    def __init__(self, dataset_config, model, model_name: str, cache_root: Path, shard_size: int = 512, caching_batch_size: int = 1):
         self.dataset_config = dataset_config
         self.model = model
         self.model_name = model_name
         self.shard_size = shard_size
+        self.caching_batch_size = caching_batch_size
         self.cache_root = cache_root
         self.preprocess_media_fn = self.model.get_preprocess_media_file_fn()
         self.vae_fn = self.model.get_call_vae_fn(self.model.get_vae())
@@ -109,6 +110,43 @@ class SD3LightManifestBuilder:
             caption_prefix = directory.get('caption_prefix', '')
             target_size = _get_target_size(directory)
             files = _list_media_files(root)
+            batch_items = []
+
+            def flush_batch():
+                nonlocal batch_items
+                if len(batch_items) == 0:
+                    return
+                device = self.model.get_vae().device
+                dtype = self.model.get_vae().dtype
+                pixel_batch = torch.stack([item['pixel_values'] for item in batch_items]).to(device, dtype=dtype)
+                masks = [item['mask'] for item in batch_items]
+                latents = self.vae_fn(pixel_batch)['latents'].cpu()
+                captions_batch = [item['caption'] for item in batch_items]
+                is_video = [False] * len(batch_items)
+
+                text_dict = {}
+                for fn in self.text_fns:
+                    td = fn(captions_batch, is_video)
+                    for k, v in td.items():
+                        text_dict[k] = v.cpu()
+
+                for idx, item in enumerate(batch_items):
+                    mask_tensor = masks[idx]
+                    if mask_tensor is None:
+                        mask_tensor = torch.tensor([])
+                    sample = {
+                        'latents': latents[idx].cpu(),
+                        'mask': mask_tensor.cpu(),
+                        'caption': item['caption'],
+                        'prompt_embed': text_dict.get('prompt_embed', torch.tensor([]))[idx] if text_dict.get('prompt_embed', None) is not None and text_dict.get('prompt_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
+                        'pooled_prompt_embed': text_dict.get('pooled_prompt_embed', torch.tensor([]))[idx] if text_dict.get('pooled_prompt_embed', None) is not None and text_dict.get('pooled_prompt_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
+                        'prompt_2_embed': text_dict.get('prompt_2_embed', torch.tensor([]))[idx] if text_dict.get('prompt_2_embed', None) is not None and text_dict.get('prompt_2_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
+                        'pooled_prompt_2_embed': text_dict.get('pooled_prompt_2_embed', torch.tensor([]))[idx] if text_dict.get('pooled_prompt_2_embed', None) is not None and text_dict.get('pooled_prompt_2_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
+                        't5_prompt_embed': text_dict.get('t5_prompt_embed', torch.tensor([]))[idx] if text_dict.get('t5_prompt_embed', None) is not None and text_dict.get('t5_prompt_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
+                    }
+                    writer.add(sample)
+                batch_items = []
+
             for media_path in tqdm(files, desc=f'building manifest for {root}'):
                 caption_file = media_path.with_suffix('.txt')
                 caption = ''
@@ -116,26 +154,16 @@ class SD3LightManifestBuilder:
                     with open(caption_file) as f:
                         caption = caption_prefix + f.read().strip()
                 size_bucket = (int(target_size[0]), int(target_size[1]), 1) if target_size else None
-                # run preprocess -> VAE -> text encoders, then move to cpu for sharding
                 processed = self.preprocess_media_fn((None, str(media_path)), None, size_bucket=size_bucket)
                 pixel_values, mask = processed[0]
-                latents = self.vae_fn(pixel_values.to(self.model.get_vae().device, self.model.get_vae().dtype))['latents']
-                text_dict = {}
-                is_video = [False] * len(processed)
-                captions_batch = [caption] * len(processed)
-                for fn in self.text_fns:
-                    text_dict.update(fn(captions_batch, is_video))
-                item = {
-                    'latents': latents.cpu(),
-                    'mask': mask if mask is None else mask.cpu(),
+                batch_items.append({
+                    'pixel_values': pixel_values,
+                    'mask': mask,
                     'caption': caption,
-                    'prompt_embed': text_dict.get('prompt_embed', torch.tensor([])),
-                    'pooled_prompt_embed': text_dict.get('pooled_prompt_embed', torch.tensor([])),
-                    'prompt_2_embed': text_dict.get('prompt_2_embed', torch.tensor([])),
-                    'pooled_prompt_2_embed': text_dict.get('pooled_prompt_2_embed', torch.tensor([])),
-                    't5_prompt_embed': text_dict.get('t5_prompt_embed', torch.tensor([])),
-                }
-                writer.add(item)
+                })
+                if len(batch_items) >= self.caching_batch_size:
+                    flush_batch()
+            flush_batch()
         writer.finalize()
         return cache_base, manifest_fp
 

@@ -90,3 +90,10 @@ dataloader_prefetch_per_worker = 2
 - 读取时 `SD3LightPretrainDataset` 将把 `target_size` 传给 `PreprocessMediaFile` 作为 `size_bucket`，进行居中裁剪 + resize（取整到 16 的倍数），并返回 `pixel_values`、`mask`、`caption`。
 - 构建 manifest 时即调用 VAE 与文本编码器，将 `latents`、各类 `prompt_embed` 以及 `mask`（无则为空张量）写入分片；训练阶段直接读取成品特征，避免在 step 内重复编码。
 - 当前只支持**单一尺寸**；如需多尺寸分桶，请使用旧管线（`sd3_streaming_dataset=false`）。
+
+## 缓存阶段批量编码
+- `caching_batch_size` 控制 manifest 构建时的编码批大小；同一个 batch 的 `pixel_values` 会 stack 后统一送入 VAE，再批量跑所有文本编码器，结果拆分写入 shard。
+- 示例：
+  ```toml
+  caching_batch_size = 8
+  ```
