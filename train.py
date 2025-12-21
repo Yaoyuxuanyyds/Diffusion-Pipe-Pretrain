@@ -548,12 +548,15 @@ if __name__ == '__main__':
 
     if sd3_streaming:
         cache_root = Path(config['output_dir']).expanduser() / 'cache'
+        sd3_shard_size = config.get('sd3_shard_size', None)
+        if sd3_shard_size is None:
+            sd3_shard_size = caching_batch_size
         manifest_builder = dataset_util.SD3LightManifestBuilder(
             dataset_config,
             model,
             model.name,
             cache_root,
-            shard_size=config.get('sd3_shard_size', 512),
+            shard_size=sd3_shard_size,
             caching_batch_size=caching_batch_size,
         )
         cache_dir, manifest_fp = manifest_builder.build(regenerate_cache=regenerate_cache or args.regenerate_cache)

@@ -65,7 +65,8 @@ class SD3LightManifestBuilder:
         self.dataset_config = dataset_config
         self.model = model
         self.model_name = model_name
-        self.shard_size = shard_size
+        # shard_size 可以和 caching_batch_size 对齐，避免拆分已编码好的 batch
+        self.shard_size = shard_size if shard_size is not None else caching_batch_size
         self.caching_batch_size = caching_batch_size
         self.cache_root = cache_root
         self.preprocess_media_fn = self.model.get_preprocess_media_file_fn()
@@ -131,6 +132,7 @@ class SD3LightManifestBuilder:
                     is_video = [False] * len(batch_items)
 
                     text_dict = {}
+                    # 批量文本编码，一次性返回批次维度的张量
                     for fn in self.text_fns:
                         td = fn(captions_batch, is_video)
                         for k, v in td.items():
