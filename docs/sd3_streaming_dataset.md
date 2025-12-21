@@ -75,3 +75,17 @@ dataloader_prefetch_per_worker = 2
 - 观察主进程与 worker 的 RSS：manifest 构建后应稳定，训练中不随 step 线性上升。
 - 压测 shard LRU：调小 `max_shards_in_memory`（构造 `ShardCache` 时）应仍能正常迭代，但磁盘 IO 增加。
 - 大批次/高累积情况下，检查 `split_batch` 后的 micro-batch 流程是否与旧逻辑一致。
+
+## 仅单尺寸 resize 的支持
+- 在 streaming 模式下（sd3_light_pretrain），manifest 会读取 `resolutions` 的第一个元素作为目标尺寸，并写入每条样本的 `target_size`。例如：
+  ```toml
+  training_type = "sd3_light_pretrain"
+  sd3_streaming_dataset = true
+  resolutions = [256]            # 或 [[256, 256]]
+
+  [[directory]]
+  path = "/data/cc12m/group_000"
+  num_repeats = 1
+  ```
+- 读取时 `SD3LightPretrainDataset` 将把 `target_size` 传给 `PreprocessMediaFile` 作为 `size_bucket`，进行居中裁剪 + resize（取整到 16 的倍数），并返回 `pixel_values`、`mask`、`caption`。
+- 当前只支持**单一尺寸**；如需多尺寸分桶，请使用旧管线（`sd3_streaming_dataset=false`）。

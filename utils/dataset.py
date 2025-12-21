@@ -87,9 +87,22 @@ class SD3LightManifestBuilder:
                         fpath.unlink()
 
         writer = ShardCacheWriter(cache_base, manifest_fp, shard_size=self.shard_size)
+
+        def _get_target_size(directory_config):
+            # only support a single resolution entry like [256] or [[256, 256]]
+            resolutions = directory_config.get('resolutions', self.dataset_config.get('resolutions', []))
+            if not resolutions:
+                return None
+            res = resolutions[0]
+            if isinstance(res, (list, tuple)):
+                if len(res) == 1:
+                    return (int(res[0]), int(res[0]))
+                return (int(res[0]), int(res[1]))
+            return (int(res), int(res))
         for directory in self.dataset_config['directory']:
             root = Path(directory['path'])
             caption_prefix = directory.get('caption_prefix', '')
+            target_size = _get_target_size(directory)
             files = _list_media_files(root)
             for media_path in tqdm(files, desc=f'building manifest for {root}'):
                 caption_file = media_path.with_suffix('.txt')
@@ -101,6 +114,7 @@ class SD3LightManifestBuilder:
                     'image_path': str(media_path),
                     'caption': caption,
                     'is_video': media_path.suffix.lower() in VIDEO_EXTENSIONS,
+                    'target_size': target_size,
                 })
         writer.finalize()
         return cache_base, manifest_fp
@@ -123,7 +137,18 @@ class SD3LightPretrainDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         meta = self.cache[idx]
-        return self.preprocess_media_fn(meta['image_path'], meta.get('caption', ''), meta.get('is_video', False))
+        target_size = meta.get('target_size', None)
+        if target_size is not None:
+            size_bucket = (int(target_size[0]), int(target_size[1]), 1)
+        else:
+            size_bucket = None
+        # wrap path like legacy spec: (tar_path, file_path)
+        processed = self.preprocess_media_fn((None, meta['image_path']), None, size_bucket=size_bucket)
+        return {
+            'pixel_values': processed[0][0],
+            'mask': processed[0][1],
+            'caption': meta.get('caption', ''),
+        }
 
 
 class SD3LightPretrainDataLoader:
