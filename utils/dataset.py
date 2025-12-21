@@ -61,13 +61,14 @@ class SD3LightManifestBuilder:
     the minimal metadata required to stream data efficiently at train time.
     """
 
-    def __init__(self, dataset_config, model, model_name: str, cache_root: Path, shard_size: int = 512, caching_batch_size: int = 1):
+    def __init__(self, dataset_config, model, model_name: str, cache_root: Path, shard_size: int = 512, caching_batch_size: int = 1, caching_num_workers: int = 0):
         self.dataset_config = dataset_config
         self.model = model
         self.model_name = model_name
         # shard_size 可以和 caching_batch_size 对齐，避免拆分已编码好的 batch
         self.shard_size = shard_size if shard_size is not None else caching_batch_size
         self.caching_batch_size = caching_batch_size
+        self.caching_num_workers = caching_num_workers
         self.cache_root = cache_root
         self.preprocess_media_fn = self.model.get_preprocess_media_file_fn()
         self.vae_fn = self.model.get_call_vae_fn(self.model.get_vae())
@@ -111,67 +112,94 @@ class SD3LightManifestBuilder:
                     return (int(res[0]), int(res[0]))
                 return (int(res[0]), int(res[1]))
             return (int(res), int(res))
+
+        entries = []
         for directory in self.dataset_config['directory']:
             root = Path(directory['path'])
             caption_prefix = directory.get('caption_prefix', '')
             target_size = _get_target_size(directory)
             files = _list_media_files(root)
-            batch_items = []
-
-            def flush_batch():
-                nonlocal batch_items
-                if len(batch_items) == 0:
-                    return
-                device = self.model.get_vae().device
-                dtype = self.model.get_vae().dtype
-                with torch.inference_mode():
-                    pixel_batch = torch.stack([item['pixel_values'] for item in batch_items]).to(device, dtype=dtype, non_blocking=True)
-                    masks = [item['mask'] for item in batch_items]
-                    latents = self.vae_fn(pixel_batch)['latents'].detach().cpu()
-                    captions_batch = [item['caption'] for item in batch_items]
-                    is_video = [False] * len(batch_items)
-
-                    text_dict = {}
-                    # 批量文本编码，一次性返回批次维度的张量
-                    for fn in self.text_fns:
-                        td = fn(captions_batch, is_video)
-                        for k, v in td.items():
-                            text_dict[k] = v.detach().cpu()
-
-                for idx, item in enumerate(batch_items):
-                    mask_tensor = masks[idx]
-                    if mask_tensor is None:
-                        mask_tensor = torch.tensor([])
-                    sample = {
-                        'latents': latents[idx],
-                        'mask': mask_tensor.cpu(),
-                        'caption': item['caption'],
-                        'prompt_embed': text_dict.get('prompt_embed', torch.tensor([]))[idx] if text_dict.get('prompt_embed', None) is not None and text_dict.get('prompt_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
-                        'pooled_prompt_embed': text_dict.get('pooled_prompt_embed', torch.tensor([]))[idx] if text_dict.get('pooled_prompt_embed', None) is not None and text_dict.get('pooled_prompt_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
-                        'prompt_2_embed': text_dict.get('prompt_2_embed', torch.tensor([]))[idx] if text_dict.get('prompt_2_embed', None) is not None and text_dict.get('prompt_2_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
-                        'pooled_prompt_2_embed': text_dict.get('pooled_prompt_2_embed', torch.tensor([]))[idx] if text_dict.get('pooled_prompt_2_embed', None) is not None and text_dict.get('pooled_prompt_2_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
-                        't5_prompt_embed': text_dict.get('t5_prompt_embed', torch.tensor([]))[idx] if text_dict.get('t5_prompt_embed', None) is not None and text_dict.get('t5_prompt_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
-                    }
-                    writer.add(sample)
-                batch_items = []
-
-            for media_path in tqdm(files, desc=f'building manifest for {root}'):
+            for media_path in files:
                 caption_file = media_path.with_suffix('.txt')
                 caption = ''
                 if caption_file.exists():
                     with open(caption_file) as f:
                         caption = caption_prefix + f.read().strip()
+                entries.append({
+                    'path': str(media_path),
+                    'caption': caption,
+                    'target_size': target_size,
+                })
+
+        class _CacheDataset(torch.utils.data.Dataset):
+            def __init__(self, entries, preprocess_fn):
+                self.entries = entries
+                self.preprocess_fn = preprocess_fn
+
+            def __len__(self):
+                return len(self.entries)
+
+            def __getitem__(self, idx):
+                e = self.entries[idx]
+                target_size = e['target_size']
                 size_bucket = (int(target_size[0]), int(target_size[1]), 1) if target_size else None
-                processed = self.preprocess_media_fn((None, str(media_path)), None, size_bucket=size_bucket)
+                processed = self.preprocess_fn((None, e['path']), None, size_bucket=size_bucket)
                 pixel_values, mask = processed[0]
-                batch_items.append({
+                if mask is None:
+                    mask = torch.tensor([])
+                return {
                     'pixel_values': pixel_values,
                     'mask': mask,
-                    'caption': caption,
-                })
-                if len(batch_items) >= self.caching_batch_size:
-                    flush_batch()
-            flush_batch()
+                    'caption': e['caption'],
+                }
+
+        def _collate_fn(batch):
+            return {
+                'pixel_values': [b['pixel_values'] for b in batch],
+                'mask': [b['mask'] for b in batch],
+                'caption': [b['caption'] for b in batch],
+            }
+
+        dataloader = torch.utils.data.DataLoader(
+            _CacheDataset(entries, self.preprocess_media_fn),
+            batch_size=self.caching_batch_size,
+            num_workers=self.caching_num_workers,
+            shuffle=False,
+            collate_fn=_collate_fn,
+            pin_memory=True,
+        )
+
+        device = self.model.get_vae().device
+        dtype = self.model.get_vae().dtype
+        for batch in tqdm(dataloader, desc='encoding cache batches'):
+            with torch.inference_mode():
+                pixel_batch = torch.stack(batch['pixel_values']).to(device, dtype=dtype, non_blocking=True)
+                latents = self.vae_fn(pixel_batch)['latents'].detach().cpu()
+                captions_batch = batch['caption']
+                is_video = [False] * len(captions_batch)
+
+                text_dict = {}
+                for fn in self.text_fns:
+                    td = fn(captions_batch, is_video)
+                    for k, v in td.items():
+                        text_dict[k] = v.detach().cpu()
+
+            masks = batch['mask']
+            for idx in range(len(captions_batch)):
+                mask_tensor = masks[idx]
+                if mask_tensor is None:
+                    mask_tensor = torch.tensor([])
+                sample = {
+                    'latents': latents[idx],
+                    'mask': mask_tensor.cpu(),
+                    'caption': captions_batch[idx],
+                    'prompt_embed': text_dict.get('prompt_embed', torch.tensor([]))[idx] if text_dict.get('prompt_embed', None) is not None and text_dict.get('prompt_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
+                    'pooled_prompt_embed': text_dict.get('pooled_prompt_embed', torch.tensor([]))[idx] if text_dict.get('pooled_prompt_embed', None) is not None and text_dict.get('pooled_prompt_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
+                    'prompt_2_embed': text_dict.get('prompt_2_embed', torch.tensor([]))[idx] if text_dict.get('prompt_2_embed', None) is not None and text_dict.get('prompt_2_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
+                    'pooled_prompt_2_embed': text_dict.get('pooled_prompt_2_embed', torch.tensor([]))[idx] if text_dict.get('pooled_prompt_2_embed', None) is not None and text_dict.get('pooled_prompt_2_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
+                    't5_prompt_embed': text_dict.get('t5_prompt_embed', torch.tensor([]))[idx] if text_dict.get('t5_prompt_embed', None) is not None and text_dict.get('t5_prompt_embed', torch.tensor([])).numel() > 0 else torch.tensor([]),
+                }
+                writer.add(sample)
         writer.finalize()
         return cache_base, manifest_fp
 

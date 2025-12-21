@@ -558,6 +558,7 @@ if __name__ == '__main__':
             cache_root,
             shard_size=sd3_shard_size,
             caching_batch_size=caching_batch_size,
+            caching_num_workers=config.get('caching_num_workers', 0),
         )
         cache_dir, manifest_fp = manifest_builder.build(regenerate_cache=regenerate_cache or args.regenerate_cache)
         train_data = dataset_util.SD3LightPretrainDataset(dataset_config, model, cache_dir, manifest_fp)
