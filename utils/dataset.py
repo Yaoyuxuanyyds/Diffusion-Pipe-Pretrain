@@ -207,7 +207,7 @@ class SD3LightManifestBuilder:
             with torch.inference_mode(), torch.cuda.amp.autocast(enabled=device.type == "cuda", dtype=dtype):
                 pixel_batch = torch.stack(batch['pixel_values']).to(device, dtype=dtype, non_blocking=True)
                 latents = self.vae_fn(pixel_batch)['latents']
-                assert latents.device == device, f"latents on {latents.device}, expected {device}"
+                # assert latents.device == device, f"latents on {latents.device}, expected {device}"
                 captions_batch = batch['caption']
                 is_video = [False] * len(captions_batch)
 

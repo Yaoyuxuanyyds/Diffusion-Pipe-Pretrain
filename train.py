@@ -563,6 +563,8 @@ if __name__ == '__main__':
         )
         cache_dir, manifest_fp = manifest_builder.build(regenerate_cache=regenerate_cache or args.regenerate_cache)
         train_data = dataset_util.SD3LightPretrainDataset(dataset_config, model, cache_dir, manifest_fp)
+        if args.cache_only:
+            quit()
     else:
         dataset_manager = dataset_util.DatasetManager(model, regenerate_cache=regenerate_cache, trust_cache=args.trust_cache, caching_batch_size=caching_batch_size)
 
