@@ -159,10 +159,11 @@ def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerp
 class TextEmbeddingDataset:
     def __init__(self, te_dataset, flattened_captions):
         self.te_dataset = te_dataset
-        self.flattened_captions = flattened_captions
         self.latents_idx_to_te_idx = defaultdict(list)
         for i, latents_idx in enumerate(flattened_captions['latents_idx']):
             self.latents_idx_to_te_idx[int(latents_idx)].append(i)
+        # drop heavy reference to flattened captions to minimize fork-time footprint / COW
+        self.flattened_captions = None
 
     def get_text_embeddings(self, latents_idx, caption_number):
         return self.te_dataset[self.latents_idx_to_te_idx[int(latents_idx)][caption_number]]
@@ -286,8 +287,9 @@ class SizeBucketDataset:
             np.save(order_file, np.stack([latents_indices, caption_numbers], axis=1))
             np.save(caption_file, captions_array)
 
-        self.iteration_order = np.load(order_file)
-        self.captions_array = np.load(caption_file)
+        # use memmap to avoid copying large arrays into each worker process
+        self.iteration_order = np.load(order_file, mmap_mode='r')
+        self.captions_array = np.load(caption_file, mmap_mode='r')
 
     def cache_text_embeddings(self, map_fn, i, regenerate_cache=False, caching_batch_size=1):
         print(f'caching text embeddings: {self.size_bucket}')
@@ -296,6 +298,10 @@ class SizeBucketDataset:
 
     def add_text_embedding_dataset(self, te_dataset):
         self.text_embedding_datasets.append(te_dataset)
+
+    def finalize_for_training(self):
+        # Drop metadata to avoid it being duplicated across worker processes via COW.
+        self.metadata_dataset = None
 
     def __getitem__(self, idx):
         idx = idx % len(self.iteration_order)
@@ -488,6 +494,8 @@ class DirectoryDataset:
             frame_buckets.append(1)
         frame_buckets.sort()
         self.frame_buckets = np.array(frame_buckets)
+        # Free heavier references after caches are built.
+        self._finalized = False
 
     def validate(self):
         resolutions = self.directory_config.get('resolutions', self.dataset_config.get('resolutions', []))
@@ -947,6 +955,14 @@ class Dataset:
         if subsample_ratio := self.dataset_config.get('subsample_ratio', None):
             new_len = int(len(self) * subsample_ratio)
             self.iteration_order = self.iteration_order[:new_len]
+
+        # Once everything is ready for training, drop metadata that is no longer needed to
+        # reduce forked worker memory / COW pressure.
+        if not self._finalized:
+            for directory_dataset in self.directory_datasets:
+                for size_bucket_dataset in directory_dataset.get_size_bucket_datasets():
+                    size_bucket_dataset.finalize_for_training()
+            self._finalized = True
 
     def set_eval_quantile(self, quantile):
         self.eval_quantile = quantile
