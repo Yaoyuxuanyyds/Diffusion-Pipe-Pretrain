@@ -424,7 +424,7 @@ if __name__ == '__main__':
     # Now initialize deepspeed
     deepspeed.init_distributed()
     
-    local_rank = args.local_rank
+    local_rank = args.local_rank if args.local_rank >= 0 else int(os.environ["LOCAL_RANK"])
     # needed for broadcasting Queue in dataset.py
     # torch.cuda.set_device(dist.get_rank())
     torch.cuda.set_device(local_rank)
