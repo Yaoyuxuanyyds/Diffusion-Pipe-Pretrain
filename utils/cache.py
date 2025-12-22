@@ -14,6 +14,21 @@ class ShardInfo:
     length: int
 
 
+def _atomic_write_json(path: Path, data: dict):
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(data, f)
+    tmp_path.replace(path)
+
+
+def _load_manifest(manifest_path: Path) -> dict:
+    try:
+        with open(manifest_path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"Cache manifest at {manifest_path} is unreadable; please regenerate the cache.") from exc
+
+
 class ShardCacheWriter:
     """
     A lightweight, append-only sharded cache writer.
@@ -27,13 +42,11 @@ class ShardCacheWriter:
     def __init__(
         self,
         cache_dir: Path,
-        fingerprint: str,
         shard_size: int = 512,
         existing_shards: Optional[List[ShardInfo]] = None,
         start_total: int = 0,
     ):
         self.cache_dir = Path(cache_dir)
-        self.fingerprint = fingerprint
         self.shard_size = shard_size
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_file = self.cache_dir / "manifest.json"
@@ -59,16 +72,15 @@ class ShardCacheWriter:
     def finalize(self):
         self._flush()
         manifest = {
-            "fingerprint": self.fingerprint,
             "total": self.total,
             "shard_size": self.shard_size,
             "shards": [
                 {"path": shard.path.name, "length": shard.length}
                 for shard in self.shards
             ],
+            "completed": True,
         }
-        with open(self.manifest_file, "w") as f:
-            json.dump(manifest, f)
+        _atomic_write_json(self.manifest_file, manifest)
 
 
 class ShardCache:
@@ -77,15 +89,21 @@ class ShardCache:
     Keeps a small LRU of loaded shards to minimize disk reads while keeping memory bounded.
     """
 
-    def __init__(self, cache_dir: Path, expected_fingerprint: str, max_shards_in_memory: int = 2):
+    def __init__(
+        self,
+        cache_dir: Path,
+        max_shards_in_memory: int = 2,
+    ):
         self.cache_dir = Path(cache_dir)
-        with open(self.cache_dir / "manifest.json") as f:
-            manifest = json.load(f)
+        manifest_path = self.cache_dir / "manifest.json"
+        manifest = _load_manifest(manifest_path)
 
-        if manifest["fingerprint"] != expected_fingerprint:
-            raise ValueError(
-                f"Cache fingerprint mismatch: expected {expected_fingerprint}, got {manifest['fingerprint']}"
-            )
+        # Backward compatibility: old manifests used fingerprint. Treat them as completed and rewrite.
+        if "fingerprint" in manifest or not manifest.get("completed", False):
+            manifest = dict(manifest)
+            manifest.pop("fingerprint", None)
+            manifest["completed"] = True
+            _atomic_write_json(manifest_path, manifest)
 
         self.total = manifest["total"]
         self.shards: List[ShardInfo] = []
@@ -128,24 +146,27 @@ class ShardCache:
 
 class MultiShardCache:
     """
-    Reader that aggregates multiple ShardCache directories sharing the same fingerprint.
+    Reader that aggregates multiple ShardCache directories.
     This allows training to seamlessly iterate over caches built from multiple dataset
     directories without copying shards into a single folder.
     """
 
-    def __init__(self, cache_dirs: List[Path], expected_fingerprint: str, max_shards_in_memory: int = 2):
+    def __init__(
+        self,
+        cache_dirs: List[Path],
+        max_shards_in_memory: int = 2,
+    ):
         self.cache_dirs = [Path(p) for p in cache_dirs]
         self.shards: List[ShardInfo] = []
         self.total = 0
         for cache_dir in self.cache_dirs:
             manifest_path = cache_dir / "manifest.json"
-            with open(manifest_path) as f:
-                manifest = json.load(f)
-            if manifest["fingerprint"] != expected_fingerprint:
-                raise ValueError(
-                    f"Cache fingerprint mismatch in {cache_dir}: expected {expected_fingerprint}, "
-                    f"got {manifest['fingerprint']}"
-                )
+            manifest = _load_manifest(manifest_path)
+            if "fingerprint" in manifest or not manifest.get("completed", False):
+                manifest = dict(manifest)
+                manifest.pop("fingerprint", None)
+                manifest["completed"] = True
+                _atomic_write_json(manifest_path, manifest)
             for shard in manifest["shards"]:
                 self.shards.append(
                     ShardInfo(
@@ -184,8 +205,8 @@ class MultiShardCache:
         return shard_data[offset]
 
 
-def streaming_write(cache_dir: Path, fingerprint: str, data_iter: Iterable[Any], shard_size: int = 512):
-    writer = ShardCacheWriter(cache_dir, fingerprint, shard_size=shard_size)
+def streaming_write(cache_dir: Path, data_iter: Iterable[Any], shard_size: int = 512):
+    writer = ShardCacheWriter(cache_dir, shard_size=shard_size)
     for item in data_iter:
         writer.add(item)
     writer.finalize()
@@ -199,30 +220,28 @@ class Cache:
 
     def __init__(self, path: str, fingerprint: str, shard_size_gb: float = 1):
         self.path = Path(path)
-        self.fingerprint = fingerprint
         self.shard_size = int(max(1, shard_size_gb * 1024))  # roughly align with old behavior
         self.path.mkdir(parents=True, exist_ok=True)
         manifest = self.path / "manifest.json"
         if manifest.exists():
-            with open(manifest) as f:
-                data = json.load(f)
-            if data.get("fingerprint") != fingerprint:
-                self.clear()
-                self._init_empty()
-            else:
-                self.total = data["total"]
-                self.shards = [
-                    ShardInfo(path=self.path / shard["path"], length=shard["length"])
-                    for shard in data["shards"]
-                ]
-                self.reader = ShardCache(self.path, fingerprint)
-                self.writer = ShardCacheWriter(
-                    self.path,
-                    fingerprint,
-                    shard_size=self.shard_size,
-                    existing_shards=self.shards,
-                    start_total=self.total,
-                )
+            data = _load_manifest(manifest)
+            if data.get("fingerprint") is not None or not data.get("completed", False):
+                # Legacy manifest: drop fingerprint and mark completed.
+                data.pop("fingerprint", None)
+                data["completed"] = True
+                _atomic_write_json(manifest, data)
+            self.total = data["total"]
+            self.shards = [
+                ShardInfo(path=self.path / shard["path"], length=shard["length"])
+                for shard in data["shards"]
+            ]
+            self.reader = ShardCache(self.path)
+            self.writer = ShardCacheWriter(
+                self.path,
+                shard_size=self.shard_size,
+                existing_shards=self.shards,
+                start_total=self.total,
+            )
         else:
             self._init_empty()
 
@@ -230,7 +249,7 @@ class Cache:
         self.total = 0
         self.shards: List[ShardInfo] = []
         self.reader: Optional[ShardCache] = None
-        self.writer = ShardCacheWriter(self.path, self.fingerprint, shard_size=self.shard_size)
+        self.writer = ShardCacheWriter(self.path, shard_size=self.shard_size)
 
     def __len__(self):
         return self.total + len(self.writer.items)
@@ -238,7 +257,7 @@ class Cache:
     def __getitem__(self, idx):
         if self.reader is None:
             self.writer.finalize()
-            self.reader = ShardCache(self.path, self.fingerprint)
+            self.reader = ShardCache(self.path)
         return self.reader[idx]
 
     def add(self, item: Any):
@@ -248,7 +267,7 @@ class Cache:
         self.writer.finalize()
         self.total = self.writer.total
         self.shards = self.writer.shards
-        self.reader = ShardCache(self.path, self.fingerprint)
+        self.reader = ShardCache(self.path)
 
     def clear(self):
         if self.path.exists():
