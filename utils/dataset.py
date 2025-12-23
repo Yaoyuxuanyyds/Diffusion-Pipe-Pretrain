@@ -413,6 +413,8 @@ class SD3LightPretrainDataLoader:
         gradient_accumulation_steps: int,
         num_workers: int = 4,
         prefetch_factor: int = 2,
+        shuffle: bool = True,
+        drop_last: bool = True,
     ):
         self.dataset = dataset
         self.model = model
@@ -421,13 +423,15 @@ class SD3LightPretrainDataLoader:
         self.micro_batch_size_per_gpu = micro_batch_size_per_gpu
         self.batch_size = micro_batch_size_per_gpu * gradient_accumulation_steps
         self.prefetch_factor = prefetch_factor
+        self.shuffle = shuffle
+        self.drop_last = drop_last
 
         self.sampler = torch.utils.data.distributed.DistributedSampler(
             self.dataset,
             num_replicas=model_engine.grid.get_data_parallel_world_size(),
             rank=model_engine.grid.get_data_parallel_rank(),
-            shuffle=True,
-            drop_last=True,
+            shuffle=self.shuffle,
+            drop_last=self.drop_last,
         )
         self.dataloader = torch.utils.data.DataLoader(
             self.dataset,
