@@ -16,6 +16,7 @@ import deepspeed
 from deepspeed import comm as dist
 from deepspeed.runtime.pipe import module as ds_pipe_module
 import torch
+import torch.distributed as torch_dist
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -421,13 +422,29 @@ if __name__ == '__main__':
     # Initialize distributed environment before deepspeed
     # world_size, rank, local_rank = distributed_init(args)
 
-    # Now initialize deepspeed
-    deepspeed.init_distributed()
-    
-    local_rank = args.local_rank if args.local_rank >= 0 else int(os.environ["LOCAL_RANK"])
+    local_rank = args.local_rank if args.local_rank >= 0 else int(os.environ.get("LOCAL_RANK", 0))
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    torch.cuda.set_device(local_rank)
+
+    # Initialize torch.distributed explicitly so device mapping is known before DeepSpeed wires groups
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    os.environ.setdefault("MASTER_ADDR", os.environ.get("MASTER_ADDR", "127.0.0.1"))
+    os.environ.setdefault("MASTER_PORT", os.environ.get("MASTER_PORT", str(args.master_port)))
+    if not torch_dist.is_initialized():
+        torch_dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            rank=rank,
+            world_size=world_size,
+            device_id=local_rank,
+        )
+
+    # Now initialize deepspeed (will reuse existing process group)
+    deepspeed.init_distributed(dist_backend="nccl", init_method="env://")
+
     # needed for broadcasting Queue in dataset.py
     # torch.cuda.set_device(dist.get_rank())
-    torch.cuda.set_device(local_rank)
 
     resume_from_checkpoint = (
         args.resume_from_checkpoint if args.resume_from_checkpoint is not None
