@@ -178,7 +178,11 @@ class SD3LightManifestBuilder:
                     # Another process might have already removed it.
                     continue
 
-        def _wait_for_manifest_ready(target_bases: list[Path], timeout_sec: float = 600.0, poll_interval: float = 1.0):
+        def _wait_for_manifest_ready(
+            target_bases: list[Path],
+            timeout_sec: float | None = None,
+            poll_interval: float = 1.0,
+        ):
             start = time.time()
             last_log = start
 
@@ -204,7 +208,7 @@ class SD3LightManifestBuilder:
                     return
 
                 elapsed = time.time() - start
-                if elapsed > timeout_sec:
+                if timeout_sec is not None and elapsed > timeout_sec:
                     raise TimeoutError(f"Cache manifest incomplete after waiting {timeout_sec}s: {target_bases}")
 
                 now = time.time()
@@ -217,6 +221,7 @@ class SD3LightManifestBuilder:
         cache_dirs = []
         entries = []
         directories = []
+        manifest_timeout = self.dataset_config.get("sd3_manifest_timeout_sec", None)
         for directory in self.dataset_config['directory']:
             root = Path(directory['path'])
             cache_base = _cache_base_for_directory(root)
@@ -252,12 +257,12 @@ class SD3LightManifestBuilder:
 
         # Only the main process should perform caching to avoid racing clears/deletes.
         if not builder_process:
-            _wait_for_manifest_ready([cb for _, cb, _ in directories])
+            _wait_for_manifest_ready([cb for _, cb, _ in directories], timeout_sec=manifest_timeout)
             return cache_dirs if cache_dirs else [self.cache_root], None
 
         # If everything is already cached, just validate manifests and return.
         if not entries:
-            _wait_for_manifest_ready(cache_dirs)
+            _wait_for_manifest_ready(cache_dirs, timeout_sec=manifest_timeout)
             return cache_dirs if cache_dirs else [self.cache_root], None
 
         class _CacheDataset(torch.utils.data.Dataset):
@@ -357,7 +362,7 @@ class SD3LightManifestBuilder:
                 pass
 
         # Synchronize with other ranks so they can safely read the manifest.
-        _wait_for_manifest_ready(cache_dirs)
+        _wait_for_manifest_ready(cache_dirs, timeout_sec=manifest_timeout)
         return cache_dirs if cache_dirs else [self.cache_root], None
 
 

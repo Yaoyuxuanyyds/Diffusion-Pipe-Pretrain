@@ -41,7 +41,7 @@
 ## 训练流程（sd3_light_pretrain）
 1. 通过 `SD3LightManifestBuilder.build()` 生成/校验 manifest（fingerprint 不一致时自动清空）。
 2. 构造 `SD3LightPretrainDataset`（持有 `ShardCache` 与模型的 `preprocess` 函数）。
-3. 创建 `SD3LightPretrainDataLoader`（支持 `shuffle=False` 关闭全量 randperm、`drop_last` 可调）：
+3. 创建 `SD3LightPretrainDataLoader`（支持 `shuffle=False` 关闭全量 randperm、`drop_last` 可调；缓存等待超时时长可用 `sd3_manifest_timeout_sec` 配置，默认无限等待）：
    - `batch_size = micro_batch_size_per_gpu * gradient_accumulation_steps`
    - 使用 `DistributedSampler` 分发样本并乱序。
    - 每个 batch 经 `model.prepare_inputs` + `_broadcast_target`，然后按梯度累积切成 micro-batch。
@@ -56,6 +56,7 @@
 ## 扩展与调优
 - `sd3_shard_size`：控制 manifest 分片大小（默认 512）。
 - `num_dataloader_workers` / `dataloader_prefetch_per_worker`：平衡 CPU 吞吐与主机内存。
+- `sd3_manifest_timeout_sec`：构建/等待 manifest 的超时时间；默认无限等待，若希望在缓存异常时尽快报错，可设置为秒数。
 - 如需在缓存阶段增加校验/过滤，可在 `SD3LightManifestBuilder.build` 中扩展。
 
 ## 启用方式与配置示例
