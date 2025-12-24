@@ -1,0 +1,112 @@
+import os
+
+OUTPUT_DIR = "/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/settings/cache/train_configs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+template = """# -------------------------
+# Output & Dataset
+# -------------------------
+output_dir = '/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/outputs/sd3_test'
+dataset = '/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/settings/cache/dataset/{DATASET_NAME}'
+
+# ===============================
+# Training length
+# ===============================
+epochs = 1000
+
+# ===============================
+# Batch size & parallelism
+# ===============================
+# Per-GPU micro batch
+micro_batch_size_per_gpu = 128
+
+caching_batch_size = 128
+caching_num_workers=48
+map_num_proc = 60
+
+
+
+sd3_streaming_dataset = true          # 走新管线，默认为 true
+sd3_shard_size = 4096                  # 可调分片大小
+num_dataloader_workers = 4
+dataloader_prefetch_per_worker = 1
+
+
+
+
+
+pipeline_stages = 1
+gradient_accumulation_steps = 1
+gradient_clipping = 1.0
+
+
+
+# ===============================
+# LR schedule
+# ===============================
+warmup_steps = 1000
+lr_scheduler = 'constant'   # warmup + constant
+
+# ===============================
+# Evaluation
+# ===============================
+eval_every_n_steps = 500
+eval_before_first_step = true
+
+eval_micro_batch_size_per_gpu = 64
+eval_gradient_accumulation_steps = 1
+
+# ===============================
+# Saving
+# ===============================
+save_every_n_steps = 2500
+save_dtype = 'bfloat16'
+
+# ===============================
+# Memory / speed
+# ===============================
+activation_checkpointing = true
+partition_method = 'parameters'
+
+steps_per_print = 10
+
+
+
+# -------------------------
+# Model
+# -------------------------
+[model]
+type = 'sd3'
+diffusers_path = '/inspire/hdd/project/chineseculture/public/yuxuan/base_models/Diffusion/SD3'
+
+dtype = 'bfloat16'
+transformer_dtype = 'float8'
+timestep_sample_method = 'logit_normal'
+
+
+
+
+# ===============================
+# Optimizer
+# ===============================
+[optimizer]
+type = 'adamw'
+lr = 1e-4
+betas = [0.9, 0.999]
+weight_decay = 0.01
+eps = 1e-8
+
+
+"""
+
+for i in range(32):
+    dataset_name = f"sd3_cache_dataset_{i:04d}.toml"
+    config_text = template.replace("{DATASET_NAME}", dataset_name)
+
+    config_path = os.path.join(OUTPUT_DIR, f"sd3_cache_{i:04d}.toml")
+    with open(config_path, "w") as f:
+        f.write(config_text)
+
+    print(f"Generated {config_path}")
+
+print("\nAll 32 training configs generated.")
