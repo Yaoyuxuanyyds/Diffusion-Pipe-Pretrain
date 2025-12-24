@@ -67,6 +67,7 @@ def compare_state_dicts(
     base_state: Dict[str, torch.Tensor],
     target_state: Dict[str, torch.Tensor],
     name: str,
+    baseline_name: str,
     atol: float = 1e-6,
 ) -> bool:
     shared_keys = sorted(set(base_state) & set(target_state))
@@ -76,23 +77,46 @@ def compare_state_dicts(
     missing_in_target = sorted(set(base_state) - set(target_state))
     missing_in_base = sorted(set(target_state) - set(base_state))
     if missing_in_target:
-        print(f"[WARN] {name} is missing {len(missing_in_target)} keys found in base model.")
+        print(
+            f"[WARN] {name} is missing {len(missing_in_target)} keys found in {baseline_name}."
+        )
     if missing_in_base:
-        print(f"[WARN] {name} has {len(missing_in_base)} extra keys not in base model.")
+        print(
+            f"[WARN] {name} has {len(missing_in_base)} extra keys not in {baseline_name}."
+        )
 
     max_abs_diff = 0.0
     changed_keys = 0
+    unchanged_keys: list[str] = []
     for key in shared_keys:
         diff = (target_state[key] - base_state[key]).abs().max().item()
         if diff > atol:
             changed_keys += 1
+        else:
+            unchanged_keys.append(key)
         max_abs_diff = max(max_abs_diff, diff)
 
     total_keys = len(shared_keys)
     print(
-        f"[CHECK] {name}: {changed_keys}/{total_keys} parameters differ "
+        f"[CHECK] {name}: {changed_keys}/{total_keys} parameters differ vs {baseline_name} "
         f"(max_abs_diff={max_abs_diff:.6f}, atol={atol})."
     )
+    if unchanged_keys:
+        prefix_counts: dict[str, int] = {}
+        for key in unchanged_keys:
+            parts = key.split(".")
+            prefix = ".".join(parts[:2]) if len(parts) > 1 else parts[0]
+            prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+        sorted_prefixes = sorted(prefix_counts.items(), key=lambda item: (-item[1], item[0]))
+        max_groups = 20
+        print(f"[INFO] {name}: unchanged parameter groups (top {max_groups}):")
+        for prefix, count in sorted_prefixes[:max_groups]:
+            print(f"  - {prefix}: {count}")
+        if len(sorted_prefixes) > max_groups:
+            remaining = len(sorted_prefixes) - max_groups
+            print(f"  ... and {remaining} more groups")
+    else:
+        print(f"[INFO] {name}: no unchanged parameters vs {baseline_name}.")
     return changed_keys > 0
 
 
@@ -125,7 +149,12 @@ def main():
     print("[2] Loading trained transformer weights...")
     trained_state = load_transformer_state(str(model_dir), dtype)
 
-    changed = compare_state_dicts(base_state, trained_state, name="trained")
+    changed = compare_state_dicts(
+        base_state,
+        trained_state,
+        name="trained",
+        baseline_name="base",
+    )
     if not changed:
         raise RuntimeError("Trained weights are identical to base weights.")
 
@@ -135,7 +164,12 @@ def main():
         if not isinstance(ema_state, dict) or not ema_state:
             raise ValueError(f"Invalid ema_shadow at {args.ema_shadow}: empty or not a dict")
         ema_state = normalize_ema_state(ema_state)
-        ema_changed = compare_state_dicts(base_state, ema_state, name="ema")
+        ema_changed = compare_state_dicts(
+            trained_state,
+            ema_state,
+            name="ema",
+            baseline_name="trained",
+        )
         if not ema_changed:
             raise RuntimeError("EMA weights are identical to base weights.")
     else:
