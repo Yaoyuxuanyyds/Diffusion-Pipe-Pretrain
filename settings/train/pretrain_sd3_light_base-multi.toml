@@ -1,7 +1,7 @@
 # ===============================
 # Output
 # ===============================
-output_dir = '/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/outputs/sd3_light_pretrain/base-mmdit'
+output_dir = '/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/outputs/sd3_light_pretrain/base-mmdit-fulldata'
 
 dataset = '/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/settings/train/cc12m_dataset.toml'
 
@@ -31,8 +31,8 @@ gradient_accumulation_steps = 1
 gradient_clipping = 1.0
 
 map_num_proc = 160
-num_dataloader_workers = 4
-prefetch_batches_per_worker = 1
+num_dataloader_workers = 32
+prefetch_batches_per_worker = 2
 
 # ===============================
 # LR schedule
