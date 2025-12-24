@@ -127,9 +127,9 @@ def compare_state_dicts(
 
 def main():
     parser = argparse.ArgumentParser(description="Validate sd3_light weights by comparing to base init.")
-    parser.add_argument("--model_dir", required=True, help="Path to saved sd3_light model directory.")
-    parser.add_argument("--base_model_dir", default=None, help="Path to base diffusers model directory.")
-    parser.add_argument("--ema_shadow", default=None, help="Path to ema_shadow.pt (optional).")
+    parser.add_argument("--model_dir", default="/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/outputs/sd3_light_pretrain/base-mmdit/20251223_17-52-21/step10000", help="Path to saved sd3_light model directory.")
+    parser.add_argument("--base_model_dir", default="/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/outputs/sd3_light_pretrain/sd3_light-layer15_init", help="Path to base diffusers model directory.")
+    parser.add_argument("--ema_shadow", default="/inspire/hdd/project/chineseculture/public/yuxuan/diffusion-pipe/outputs/sd3_light_pretrain/base-mmdit/20251223_17-52-21/step10000/ema_shadow.pt", help="Path to ema_shadow.pt (optional).")
     parser.add_argument("--dtype", default="float16", help="float16|bfloat16|float32")
 
     # legacy args preserved for compatibility with sample-test.sh
