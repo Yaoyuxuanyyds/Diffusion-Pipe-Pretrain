@@ -519,7 +519,12 @@ class LightSD3Pipeline(BasePipeline):
 
     
     def prepare_inputs(self, inputs, timestep_quantile=None):
-        latents = inputs["latents"].float()
+        latents = inputs["latents"]
+        if isinstance(latents, dict):
+            if "latents" not in latents:
+                raise ValueError("Latents dict is missing 'latents' key.")
+            latents = latents["latents"]
+        latents = latents.float()
         prompt_embed = inputs["prompt_embed"]
         pooled_prompt_embed = inputs["pooled_prompt_embed"]
         prompt_2_embed = inputs["prompt_2_embed"]
